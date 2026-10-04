@@ -21,11 +21,15 @@ import (
 
 const SaltSize = 8
 
+const badOffset = 0xffffffffffffffff
+
 type fileState struct {
 	// size of the file
 	size uint64
 	// current offset
 	off uint64
+	// current file offset
+	foff uint64
 }
 
 type File struct {
@@ -76,6 +80,7 @@ func (f *File) blockMask(dst *[BlockSize]byte, idx uint64) {
 	f.cipher.Encrypt(dst[:], dst[:])
 }
 
+// Loads the meta block of the file (first one)
 func (f *File) loadMeta() error {
 	var meta [BlockSize]byte
 	err := f.readBlockAt(&meta, 0)
@@ -87,6 +92,7 @@ func (f *File) loadMeta() error {
 	return nil
 }
 
+// Saves the meta block to the file (first one)
 func (f *File) storeMeta() error {
 	var meta [BlockSize]byte
 	binary.BigEndian.PutUint64(meta[:], f.s.size)
@@ -94,11 +100,45 @@ func (f *File) storeMeta() error {
 	return f.writeBlockAt(&meta, 0)
 }
 
+// Begins a read/write sequence at the specified offset in the file
+// The offset must be at the start of a block
+func (f *File) beginSeqAt(at uint64) error {
+	if at%BlockSize != 0 {
+		return JosefError{m: "Bad offset"}
+	}
+	off, err := f.base.Seek(int64(at), 0)
+	if err != nil {
+		return err
+	}
+	if off < 0 || uint64(off) != at {
+		f.s.foff = badOffset
+		return JosefError{m: "Failed to seek"}
+	}
+	f.s.foff = at
+	return nil
+}
+
 func (f *File) readBlockAt(dst *[BlockSize]byte, idx uint64) error {
-	n, err := f.base.ReadAt(dst[:BlockSize], int64(idx*BlockSize))
+	var n int
+	var err error
+
+	// Tries sequential Read(), or defaults to ReadAt()
+	if f.s.foff == idx*BlockSize {
+		// fmt.Printf("  r\x1b[92mR\x1b[39m %016X\n", f.s.foff)
+		n, err = f.base.Read(dst[:])
+		if n == BlockSize {
+			f.s.foff += BlockSize
+		} else {
+			f.s.foff = badOffset
+		}
+	} else {
+		// fmt.Printf("  r\x1b[91mA\x1b[39m %016X \x1b[90m!= %016X\x1b[39m\n", f.s.foff, idx*BlockSize)
+		n, err = f.base.ReadAt(dst[:], int64(idx*BlockSize))
+	}
+
 	if err != nil { return err }
 	if n != BlockSize {
-		return JosefError{m: "Could not read block"}
+		return JosefError{m: "Could not read entire block"}
 	}
 	
 	f.cipher.Decrypt(dst[:], dst[:])
@@ -123,9 +163,31 @@ func (f *File) writeBlockAt(src *[BlockSize]byte, idx uint64) error {
 	}
 	
 	f.cipher.Encrypt(block[:], block[:])
-	_, err := f.base.WriteAt(block[:], int64(idx*BlockSize))
+
+	var n int
+	var err error
 	
-	return err
+	// Tries sequential Write(), or defaults to WriteAt()
+	if f.s.foff == idx*BlockSize {
+		// fmt.Printf("  w\x1b[92mR\x1b[39m %016X\n", f.s.foff)
+		n, err = f.base.Write(block[:])
+		if n == BlockSize {
+			f.s.foff += BlockSize
+		} else {
+			f.s.foff = badOffset
+		}
+	} else {
+		// fmt.Printf("  w\x1b[91mA\x1b[39m %016X \x1b[90m!= %016X\x1b[39m\n", f.s.foff, idx*BlockSize)
+		n, err = f.base.WriteAt(block[:], int64(idx*BlockSize))
+	}
+
+	if err != nil { return err }
+	
+	if n != BlockSize {
+		return JosefError{m: "Could not write entire block"}
+	}
+	
+	return nil
 }
 
 func (f File) Close() error {
@@ -172,6 +234,8 @@ func (f File) Read(p []byte) (int, error) {
 	}
 
 	// read remaining block-aligned data
+	err = f.beginSeqAt(f.s.off+BlockSize)
+	if err != nil { return 0, err }
 	i := uint64(0)
 	for i < uint64(len(p)) {
 		err = f.readBlockAt(&block, f.s.off/BlockSize+1)
@@ -187,12 +251,21 @@ func (f File) Read(p []byte) (int, error) {
 
 func (f File) ReadAt(p []byte, off int64) (int, error) {
 	debug(f.log, "ReadAt([%d], %d)", len(p), off)
+
+	baseOff := f.s.off
+
 	var err error
+	var n int
 	off, err = f.Seek(off, 0)
 	if err != nil {
 		return 0, err
 	}
-	return f.Read(p)
+
+	n, err = f.Read(p)
+
+	f.s.off = baseOff
+
+	return n, err
 }
 
 func (f File) Seek(offset int64, whence int) (int64, error) {
@@ -276,20 +349,24 @@ func (f File) Write(p []byte) (int, error) {
 	}
 	
 	// write remaining block-aligned data
-	for off < uint64(len(p)) {
-		if len(p[off:]) < len(block) {
-			f.readBlockAt(&block, f.s.off/BlockSize+1)
-		}
-		n := uint64(copy(block[:], p[off:]))
-		err = f.writeBlockAt(&block, f.s.off/BlockSize+1)
-		f.s.off += n
-		off += n
-		if f.s.off > f.s.size {
-			f.s.size = f.s.off
-		}
+	if off < uint64(len(p)) {
+		err = f.beginSeqAt(f.s.off+BlockSize)
 		if err != nil { return 0, err }
-		if len(p) < BlockSize {
-			break
+		for off < uint64(len(p)) {
+			if len(p[off:]) < len(block) {
+				f.readBlockAt(&block, f.s.off/BlockSize+1)
+			}
+			n := uint64(copy(block[:], p[off:]))
+			err = f.writeBlockAt(&block, f.s.off/BlockSize+1)
+			f.s.off += n
+			off += n
+			if f.s.off > f.s.size {
+				f.s.size = f.s.off
+			}
+			if err != nil { return 0, err }
+			if len(p) < BlockSize {
+				break
+			}
 		}
 	}
 	
@@ -301,12 +378,22 @@ func (f File) Write(p []byte) (int, error) {
 
 func (f File) WriteAt(p []byte, off int64) (int, error) {
 	debug(f.log, "WriteAt([%d]{...}, %d)", len(p), off)
+
+	baseOff := f.s.off
+
 	var err error
+	var n int
+
 	off, err = f.Seek(off, 0)
 	if err != nil {
 		return 0, err
 	}
-	return f.Write(p)
+	
+	n, err = f.Write(p)
+
+	f.s.off = baseOff
+
+	return n, err
 }
 
 func (f File) Name() string {
@@ -386,6 +473,7 @@ func wrapFile(log *slog.Logger, key [KeySize]byte, path string, base afero.File,
 		s: &fileState{
 			size: 0,
 			off: 0,
+			foff: 0,
 		},
 	}
 	var info os.FileInfo
