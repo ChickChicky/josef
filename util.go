@@ -4,12 +4,16 @@ import (
 	"crypto/aes"
 	"crypto/sha512"
 	"encoding/hex"
+	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 )
 
-const keySize = 64
-const blockSize = 16
+// TODO: Make errors better
+
+const KeySize = 64
+const BlockSize = 16
 
 type JosefError struct { m string }
 
@@ -24,25 +28,37 @@ func ceildiv[T anyInt](x T, y T) T {
 }
 
 func roundup[T anyInt](x T, y T) T {
-	if x%y == 0 {
+	m := x%y
+	if m == 0 {
 		return x
 	} else {
-		return x + (y - x%y)
+		return x + (y - m)
 	}
 }
 
-var pathSalt = [blockSize]byte{
+var pathSalt = [BlockSize]byte{
 	0x74, 0x89, 0x9f, 0x46, 0x48, 0xbb, 0x16, 0x97, 0x62, 0xc6, 0x2a, 0xad, 0x40, 0x97, 0xa5, 0x9a,
 }
 
-func cipherPath(key [keySize]byte, path string) string {
+func debug(l *slog.Logger, f string, a ...any) {
+	if l == nil {
+		return
+	}
+	if len(a) == 0 {
+		l.Debug(f)
+	} else {
+		l.Debug(fmt.Sprintf(f, a...))
+	}
+}
+
+func cipherPath(key [KeySize]byte, path string) string {
 	c, err := aes.NewCipher(key[:32])
 	if err != nil {
 		panic(err)
 	}
 	
-	var bin [blockSize]byte
-	var bout [blockSize]byte
+	var bin [BlockSize]byte
+	var bout [BlockSize]byte
 	
 	copy(bin[:], pathSalt[:])
 	c.Encrypt(bout[:], bin[:])
@@ -57,16 +73,16 @@ func cipherPath(key [keySize]byte, path string) string {
 		if len(seg) <= 0 { continue }
 		
 		bytes := append([]byte{byte(len(seg))}, []byte(seg)...)
-		n := ceildiv(len(bytes), blockSize)
-		out := make([]byte, n*blockSize)
+		n := ceildiv(len(bytes), BlockSize)
+		out := make([]byte, n*BlockSize)
 		
 		for i := range n {
-			copy(bin[:], bytes[i*blockSize:])
-			for j := range blockSize {
+			copy(bin[:], bytes[i*BlockSize:])
+			for j := range BlockSize {
 				bin[j] ^= bout[j] ^ key[32+j]
 			}
 			c.Encrypt(bout[:], bin[:])
-			copy(out[i*blockSize:], bout[:])
+			copy(out[i*BlockSize:], bout[:])
 		}
 		
 		parts = append(parts, hex.EncodeToString(out))
@@ -75,14 +91,14 @@ func cipherPath(key [keySize]byte, path string) string {
 	return filepath.Clean("/"+strings.Join(parts, "/"))
 }
 
-func decipherPath(key [keySize]byte, path string) (string, error) {
+func decipherPath(key [KeySize]byte, path string) (string, error) {
 	c, err := aes.NewCipher(key[:32])
 	if err != nil {
 		panic(err)
 	}
 	
-	var bout [blockSize]byte
-	var block [blockSize]byte
+	var bout [BlockSize]byte
+	var block [BlockSize]byte
 	
 	c.Encrypt(bout[:], pathSalt[:])
 	
@@ -103,14 +119,14 @@ func decipherPath(key [keySize]byte, path string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if len(ciphered)%blockSize != 0 {
+		if len(ciphered)%BlockSize != 0 {
 			return "", JosefError{m: "Bad segment length"}
 		}
-		n := len(ciphered)/blockSize
+		n := len(ciphered)/BlockSize
 		for i := range n {
-			off := i*blockSize
+			off := i*BlockSize
 			c.Decrypt(block[off:], ciphered[off:])
-			for j := range blockSize {
+			for j := range BlockSize {
 				block[off+j] ^= bout[j] ^ key[32+j]
 			}
 			copy(bout[:], ciphered[off:])

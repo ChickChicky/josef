@@ -2,13 +2,15 @@ package josef
 
 // afero.File implementation for Josef
 
-// TODO: Add key and block size constants instead of always repeating/computing them
+// TODO: Use https://github.com/go-faster/xor for XOR operations
+// TODO: Optimize reads/writes
 
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/rand"
 	"encoding/binary"
-	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -16,6 +18,8 @@ import (
 
 	"github.com/spf13/afero"
 )
+
+const SaltSize = 8
 
 type fileState struct {
 	// size of the file
@@ -26,23 +30,22 @@ type fileState struct {
 
 type File struct {
 	log *slog.Logger
-	key [64]byte
+	key [KeySize]byte
 	path string
 	base afero.File
 
 	cipher cipher.Block
 	
+	salt [SaltSize]byte
 	s *fileState
 }
-
-// TODO: Optimize reads/writes
 
 // initializes the file's state
 func (f *File) init(new bool) error {
 	var err error
 	if new {
-		// TODO: Ensure file indeed is empty
 		f.s.size = 0
+		rand.Read(f.salt[:])
 		err = f.storeMeta()
 	} else {
 		err = f.loadMeta()
@@ -55,47 +58,53 @@ func (f *File) init(new bool) error {
 }
 
 // Gets the mask for a block in the file
-func (f *File) blockMask(dst [blockSize]byte, idx uint64) {
+func (f *File) blockMask(dst *[BlockSize]byte, idx uint64) {
 	binary.BigEndian.PutUint64(dst[:], idx)
-	for i := range ceildiv(blockSize, 8) {
+	for i := range ceildiv(BlockSize, 8) {
 		copy(dst[i*8+8:], dst[i*8:i*8+8])
+	}
+	if idx != 0 {
+		// for i := range ceildiv(blockSize, saltSize) {
+		// 	for j := range saltSize {
+		// 		dst[i*saltSize+j] ^= f.salt[j]
+		// 	}
+		// }
+		for i := range BlockSize {
+			dst[i] ^= f.salt[i%SaltSize]
+		}
 	}
 	f.cipher.Encrypt(dst[:], dst[:])
 }
 
 func (f *File) loadMeta() error {
-	var meta [blockSize]byte
+	var meta [BlockSize]byte
 	err := f.readBlockAt(&meta, 0)
 	if err != nil {
 		return err
 	}
 	f.s.size = binary.BigEndian.Uint64(meta[:])
+	copy(f.salt[:], meta[8:])
 	return nil
 }
 
 func (f *File) storeMeta() error {
-	var meta [blockSize]byte
+	var meta [BlockSize]byte
 	binary.BigEndian.PutUint64(meta[:], f.s.size)
+	copy(meta[8:], f.salt[:])
 	return f.writeBlockAt(&meta, 0)
 }
 
-func (f *File) readBlockAt(dst *[blockSize]byte, idx uint64) error {
-	if len(dst) < blockSize {
-		return JosefError{m: "Destination too small"}
-	}
-	
-	n, err := f.base.ReadAt(dst[:blockSize], int64(idx*blockSize))
-	if err != nil {
-		return err
-	}
-	if n != blockSize {
+func (f *File) readBlockAt(dst *[BlockSize]byte, idx uint64) error {
+	n, err := f.base.ReadAt(dst[:BlockSize], int64(idx*BlockSize))
+	if err != nil { return err }
+	if n != BlockSize {
 		return JosefError{m: "Could not read block"}
 	}
 	
 	f.cipher.Decrypt(dst[:], dst[:])
-	var mask [blockSize]byte
 	
-	f.blockMask(mask, idx)
+	var mask [BlockSize]byte
+	f.blockMask(&mask, idx)
 	for i, b := range mask {
 		dst[i] ^= b
 	}
@@ -103,55 +112,54 @@ func (f *File) readBlockAt(dst *[blockSize]byte, idx uint64) error {
 	return nil
 }
 
-func (f *File) writeBlockAt(src *[blockSize]byte, idx uint64) error {
-	var block [blockSize]byte
-	var mask [blockSize]byte
-	
+func (f *File) writeBlockAt(src *[BlockSize]byte, idx uint64) error {
+	var block [BlockSize]byte
 	copy(block[:], src[:])
 	
-	f.blockMask(mask, idx)
+	var mask [BlockSize]byte
+	f.blockMask(&mask, idx)
 	for i, b := range mask {
 		block[i] ^= b
 	}
 	
 	f.cipher.Encrypt(block[:], block[:])
-	_, err := f.base.WriteAt(block[:], int64(idx*blockSize))
+	_, err := f.base.WriteAt(block[:], int64(idx*BlockSize))
 	
 	return err
 }
 
 func (f File) Close() error {
-	f.log.Debug("Close()")
+	debug(f.log, "Close()")
 	return f.base.Close()
 }
 
 func (f File) Read(p []byte) (int, error) {
-	f.log.Debug(fmt.Sprintf("Read([%d]{...})", len(p)))
+	debug(f.log, "Read([%d]{...})", len(p))
 
-	if len(p) == 0 || f.s.off >= f.s.size {
+	if f.s.off >= f.s.size {
+		return 0, io.EOF
+	}
+
+	if len(p) == 0 {
 		return 0, nil
 	}
 
-	// TODO: Read directly to p if large enough
-
 	var err error
-	
-	var block [blockSize]byte
+	var block [BlockSize]byte
 
 	read := uint64(0)
 	
 	// read non block-aligned data
-	if f.s.off%blockSize != 0 {
-		err = f.readBlockAt(&block, f.s.off/blockSize+1)
+	if f.s.off%BlockSize != 0 {
+		err = f.readBlockAt(&block, f.s.off/BlockSize+1)
 		if err != nil { return int(read), err }
 		n := uint64(copy(p, block[:]))
 		f.s.off += n
 		read += n
 		p = p[n:]
-	}
-
-	if f.s.off >= f.s.size {
-		return int(read), nil
+		if f.s.off >= f.s.size {
+			return int(read), nil
+		}
 	}
 
 	// ensure p is not exceeding file size
@@ -166,7 +174,7 @@ func (f File) Read(p []byte) (int, error) {
 	// read remaining block-aligned data
 	i := uint64(0)
 	for i < uint64(len(p)) {
-		err = f.readBlockAt(&block, f.s.off/blockSize+1)
+		err = f.readBlockAt(&block, f.s.off/BlockSize+1)
 		if err != nil { return int(read), err }
 		n := uint64(copy(p[i:], block[:]))
 		f.s.off += n
@@ -178,7 +186,7 @@ func (f File) Read(p []byte) (int, error) {
 }
 
 func (f File) ReadAt(p []byte, off int64) (int, error) {
-	// f.log.Debug(fmt.Sprintf("ReadAt([%d], %d)", len(p), off))
+	debug(f.log, "ReadAt([%d], %d)", len(p), off)
 	var err error
 	off, err = f.Seek(off, 0)
 	if err != nil {
@@ -190,7 +198,7 @@ func (f File) ReadAt(p []byte, off int64) (int, error) {
 func (f File) Seek(offset int64, whence int) (int64, error) {
 	switch whence {
 	case 0: // file start
-		f.log.Debug(fmt.Sprintf("Seek(%d)", offset))
+		debug(f.log, "Seek(%d)", offset)
 		if offset < 0 {
 			return int64(f.s.off), JosefError{m: "Negative offset is not valid for absolute whence"}
 		}
@@ -209,23 +217,23 @@ func (f File) Seek(offset int64, whence int) (int64, error) {
 }
 
 func (f File) Write(p []byte) (int, error) {
-	f.log.Debug(fmt.Sprintf("Write([%d]{...})", len(p)))
+	debug(f.log, "Write([%d]{...})", len(p))
 	
 	var err error
-	var block [blockSize]byte
+	var block [BlockSize]byte
 	
-	idx := f.s.off/blockSize
+	idx := f.s.off/BlockSize
 	
 	// write missing in-between blocks
 	{
-		lastIdx := f.s.size/blockSize
+		lastIdx := f.s.size/BlockSize
 		if idx > lastIdx {
 			{
-				lastRest := f.s.size%blockSize
+				lastRest := f.s.size%BlockSize
 				if lastRest != 0 {
 					err = f.readBlockAt(&block, lastIdx+1)
 					if err != nil { return 0, err }
-					for i := lastRest; i < blockSize; i++ {
+					for i := lastRest; i < BlockSize; i++ {
 						block[i] = 0
 					}
 					err = f.writeBlockAt(&block, lastIdx+1)
@@ -233,12 +241,11 @@ func (f File) Write(p []byte) (int, error) {
 					clear(block[:])
 				}
 			}
-			// TODO: Optimize with Seek() + sequential writeBlockAs() calls
 			for off := range idx - lastIdx - 1 {
 				err = f.writeBlockAt(&block, lastIdx+off+2)
 				if err != nil { return 0, err }
 			}
-			f.s.size = idx*blockSize
+			f.s.size = idx*BlockSize
 		} else if (f.s.off < f.s.size) {
 			err = f.readBlockAt(&block, idx+1)
 			if err != nil { return 0, err }
@@ -249,11 +256,11 @@ func (f File) Write(p []byte) (int, error) {
 	
 	// write non block-aligned data
 	{
-		base := f.s.off%blockSize
-		rest := (blockSize-base)%blockSize
+		base := f.s.off%BlockSize
+		rest := (BlockSize-base)%BlockSize
 		if base != 0 {
 			n := uint64(copy(block[base:], p))
-			err = f.writeBlockAt(&block, f.s.off/blockSize+1)
+			err = f.writeBlockAt(&block, f.s.off/BlockSize+1)
 			f.s.off += n
 			off += n
 			if f.s.off > f.s.size {
@@ -271,17 +278,17 @@ func (f File) Write(p []byte) (int, error) {
 	// write remaining block-aligned data
 	for off < uint64(len(p)) {
 		if len(p[off:]) < len(block) {
-			f.readBlockAt(&block, f.s.off/blockSize+1)
+			f.readBlockAt(&block, f.s.off/BlockSize+1)
 		}
 		n := uint64(copy(block[:], p[off:]))
-		err = f.writeBlockAt(&block, f.s.off/blockSize+1)
+		err = f.writeBlockAt(&block, f.s.off/BlockSize+1)
 		f.s.off += n
 		off += n
 		if f.s.off > f.s.size {
 			f.s.size = f.s.off
 		}
 		if err != nil { return 0, err }
-		if len(p) < blockSize {
+		if len(p) < BlockSize {
 			break
 		}
 	}
@@ -293,7 +300,7 @@ func (f File) Write(p []byte) (int, error) {
 }
 
 func (f File) WriteAt(p []byte, off int64) (int, error) {
-	f.log.Debug(fmt.Sprintf("WriteAt([%d]{...}, %d)", len(p), off))
+	debug(f.log, "WriteAt([%d]{...}, %d)", len(p), off)
 	var err error
 	off, err = f.Seek(off, 0)
 	if err != nil {
@@ -303,12 +310,12 @@ func (f File) WriteAt(p []byte, off int64) (int, error) {
 }
 
 func (f File) Name() string {
-	f.log.Debug("Name()")
+	debug(f.log, "Name()")
 	return filepath.Base(f.path)
 }
 
 func (f File) Readdir(count int) ([]os.FileInfo, error) {
-	f.log.Debug(fmt.Sprintf("Readdir(%d)", count))
+	debug(f.log, "Readdir(%d)", count)
 	items, err := f.base.Readdir(count)
 	if err != nil {
 		return nil, err
@@ -324,7 +331,7 @@ func (f File) Readdir(count int) ([]os.FileInfo, error) {
 }
 
 func (f File) Readdirnames(n int) ([]string, error) {
-	f.log.Debug(fmt.Sprintf("Readdirnames(%d)", n))
+	debug(f.log, "Readdirnames(%d)", n)
 	items, err := f.base.Readdirnames(n)
 	if err != nil {
 		return nil, err
@@ -340,7 +347,7 @@ func (f File) Readdirnames(n int) ([]string, error) {
 }
 
 func (f File) Stat() (os.FileInfo, error) {
-	f.log.Debug("Stat()")
+	debug(f.log, "Stat()")
 	stat, err := f.base.Stat()
 	if err != nil {
 		return nil, err
@@ -349,21 +356,21 @@ func (f File) Stat() (os.FileInfo, error) {
 }
 
 func (f File) Sync() error {
-	f.log.Debug("Sync()")
+	debug(f.log, "Sync()")
 	return f.base.Sync()
 }
 
 func (f File) Truncate(size int64) error {
-	f.log.Debug(fmt.Sprintf("Truncate(%d)", size))
+	debug(f.log, "Truncate(%d)", size)
 	return JosefError{m: "Truncate not implemented"}
 }
 
 func (f File) WriteString(s string) (int, error) {
-	f.log.Debug(fmt.Sprintf("WriteString(%s)", s))
+	debug(f.log, "WriteString(%s)", s)
 	return f.Write([]byte(s))
 }
 
-func wrapFile(log *slog.Logger, key [64]byte, path string, base afero.File, new bool) (File, error) {
+func wrapFile(log *slog.Logger, key [KeySize]byte, path string, base afero.File, new bool) (File, error) {
 	cipher, err := aes.NewCipher(key[:32])
 	if err != nil {
 		return File{}, err

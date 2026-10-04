@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"josef"
 	"log/slog"
 	"os"
@@ -28,7 +29,12 @@ func test(fs afero.Fs, run func(file afero.File) error, expected []byte) {
 		buf := make([]byte, 512)
 		for {
 			n, err = file.Read(buf)
-			if err != nil { panic(err) }
+			if err != nil { 
+				if err == io.EOF {
+					break
+				}
+				panic(err) 
+			}
 			if n == 0 {
 				break
 			}
@@ -81,10 +87,10 @@ func main() {
 
 	test(fs, 
 		func(file afero.File) error {
-			if _, err := file.Write([]byte("thisfileonlytakesupasingleblock!")); err != nil { panic(err) }
+			if _, err := file.Write([]byte("itspansoneblock!")); err != nil { panic(err) }
 			return nil
 		}, 
-		[]byte("thisfileonlytakesupasingleblock!"),
+		[]byte("itspansoneblock!"),
 	)
 
 	test(fs, 
