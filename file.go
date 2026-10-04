@@ -47,12 +47,12 @@ func (f *File) init(new bool) error {
 		f.s.size = 0
 		rand.Read(f.salt[:])
 		err = f.storeMeta()
+		if err != nil { return err }
+		err = f.base.Truncate(BlockSize)
 	} else {
 		err = f.loadMeta()
 	}
-	if err != nil {
-		return err
-	}
+	if err != nil {return err }
 	f.s.off = 0
 	return nil
 }

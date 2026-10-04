@@ -56,5 +56,5 @@ var n int
 * Frequently reads from the underlying filesystem
     * `CacheOnReadFs` with `MemMapFs` might be a good idea if read operations are especially costly
 * `Fs.OpenFile()` does not support flags:
-    * `os.O_APPEND`/`os.O_CREATE`/`os.O_EXCL`/`os.O_SYNC`/`os.O_TRUNC`
+    * `os.O_APPEND`/`os.O_EXCL`/(`O_SYNC`, compliance is a bit uncertain)
     * `os.O_WRONLY` is not supported as it needs to read from the file (quietly replaces it with os.O_RDWR)

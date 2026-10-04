@@ -24,7 +24,7 @@ func (fs Fs) Create(name string) (afero.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	return wrapFile(fs.log.With("name", name), fs.key, name, file, true)
+	return wrapFile(sublog(fs.log, "name", name), fs.key, name, file, true)
 }
 
 // Mkdir creates a directory in the filesystem, return an error if any happens.
@@ -46,17 +46,15 @@ func (fs Fs) Open(name string) (afero.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	return wrapFile(fs.log.With("name", name), fs.key, name, file, false)
+	return wrapFile(sublog(fs.log, "name", name), fs.key, name, file, false)
 }
 
 // OpenFile opens a file using the given flags and the given mode.
 func (fs Fs) OpenFile(name string, flag int, perm os.FileMode) (afero.File, error) {
 	debug(fs.log, "OpenFile(%q, %d, %03o)", name, flag, perm)
 	if flag & os.O_APPEND != 0 { return nil, JosefError{m: "O_APPEND is not supported"} }
-	if flag & os.O_CREATE != 0 { return nil, JosefError{m: "O_CREATE is not supported"} }
 	if flag & os.O_EXCL   != 0 { return nil, JosefError{m: "O_EXCL is not supported"} }
-	if flag & os.O_SYNC   != 0 { return nil, JosefError{m: "O_SYNC is not supported"} }
-	if flag & os.O_TRUNC  != 0 { return nil, JosefError{m: "O_TRUNC is not supported"} }
+	// if flag & os.O_SYNC   != 0 { return nil, JosefError{m: "O_SYNC is not supported"} }
 	if flag & os.O_WRONLY != 0 {
 		flag &= ^os.O_WRONLY
 		flag |= os.O_RDWR
@@ -65,7 +63,7 @@ func (fs Fs) OpenFile(name string, flag int, perm os.FileMode) (afero.File, erro
 	if err != nil {
 		return nil, err
 	}
-	return wrapFile(fs.log.With("name", name), fs.key, name, file, false)
+	return wrapFile(sublog(fs.log, "name", name), fs.key, name, file, flag & os.O_TRUNC != 0)
 }
 
 // Remove removes a file identified by name, returning an error, if any happens.

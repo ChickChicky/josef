@@ -14,9 +14,7 @@ import (
 )
 
 func test(fs afero.Fs, run func(file afero.File) error, expected []byte) {
-	fs.Create("test")
-	
-	file, err := fs.OpenFile("test", os.O_RDWR, 0o600)
+	file, err := fs.OpenFile("test", os.O_RDWR | os.O_CREATE | os.O_TRUNC, 0o600)
 	if err != nil { panic(err) }
 		err = run(file)
 		if err != nil { panic(err) }
@@ -65,7 +63,7 @@ func test(fs afero.Fs, run func(file afero.File) error, expected []byte) {
 	fmt.Printf(" --- %q ok ---\n", expected)
 }
 
-func main() {
+func main() { slog.SetLogLoggerLevel(slog.LevelDebug)
 	base := afero.NewMemMapFs()
 
 	fs := josef.CreateFS(slog.Default(), base, [64]byte{})

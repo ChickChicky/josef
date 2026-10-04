@@ -51,6 +51,13 @@ func debug(l *slog.Logger, f string, a ...any) {
 	}
 }
 
+func sublog(l *slog.Logger, a ...any) *slog.Logger {
+	if l == nil {
+		return nil
+	}
+	return l.With(a...)
+}
+
 func cipherPath(key [KeySize]byte, path string) string {
 	c, err := aes.NewCipher(key[:32])
 	if err != nil {
@@ -98,11 +105,11 @@ func decipherPath(key [KeySize]byte, path string) (string, error) {
 	}
 	
 	var bout [BlockSize]byte
-	var block [BlockSize]byte
 	
 	c.Encrypt(bout[:], pathSalt[:])
 	
 	parts := []string{}
+	block := make([]byte, BlockSize)
 	
 	first := true
 	for seg := range strings.SplitSeq(filepath.Clean("/"+path), "/") {
@@ -121,6 +128,9 @@ func decipherPath(key [KeySize]byte, path string) (string, error) {
 		}
 		if len(ciphered)%BlockSize != 0 {
 			return "", JosefError{m: "Bad segment length"}
+		}
+		if len(block) < len(ciphered) {
+			block = make([]byte, len(ciphered))
 		}
 		n := len(ciphered)/BlockSize
 		for i := range n {
