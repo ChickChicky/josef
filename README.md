@@ -51,7 +51,7 @@ var n int
 ## Caveats
 
 * **Behaviour may change at any time**
-* Not externally audited, probably quite weak ryptographically speaking but should be better than nothing
+* **Not externally audited**
 * Poorly optimized
 * Frequently reads from the underlying filesystem
     * `CacheOnReadFs` with `MemMapFs` might be a good idea if read operations are especially costly
