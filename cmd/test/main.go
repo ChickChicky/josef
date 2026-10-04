@@ -14,12 +14,14 @@ import (
 )
 
 func test(fs afero.Fs, run func(file afero.File) error, expected []byte) {
+	fmt.Printf("\n=== run ===\n")
 	file, err := fs.OpenFile("test", os.O_RDWR | os.O_CREATE | os.O_TRUNC, 0o600)
 	if err != nil { panic(err) }
 		err = run(file)
 		if err != nil { panic(err) }
 	file.Close()
 
+	fmt.Printf("=== read ===\n")
 	collected := []byte{}
 	file, err = fs.OpenFile("test", os.O_RDONLY, 0o600)
 	if err != nil { panic(err) }
@@ -56,11 +58,11 @@ func test(fs afero.Fs, run func(file afero.File) error, expected []byte) {
 		// 	fmt.Print("\n")
 		// 	file.Close()
 		// }
-		fmt.Printf(" --- %q != ---\n     %q\n", collected, expected)
+		fmt.Printf("--- %q != ---\n     %q\n", collected, expected)
 		panic("oh no!")
 	}
 
-	fmt.Printf(" --- %q ok ---\n", expected)
+	fmt.Printf("--- %q ok ---\n", expected)
 }
 
 func main() { slog.SetLogLoggerLevel(slog.LevelDebug)
@@ -124,5 +126,49 @@ func main() { slog.SetLogLoggerLevel(slog.LevelDebug)
 			return nil
 		}, 
 		[]byte("----------neartheboundaryandspansmultipleblocks-----------------"),
+	)
+
+	test(fs, 
+		func(file afero.File) error {
+			if _, err := file.Write([]byte("supersecret:REDACTED")); err != nil { panic(err) }
+			if err := file.Truncate(12); err != nil { panic(err) }
+			return nil
+		}, 
+		[]byte("supersecret:"),
+	)
+
+	test(fs, 
+		func(file afero.File) error {
+			if err := file.Truncate(20); err != nil { panic(err) }
+			return nil
+		}, 
+		[]byte("\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"),
+	)
+
+	test(fs, 
+		func(file afero.File) error {
+			if _, err := file.Write([]byte("foo")); err != nil { panic(err) }
+			if err := file.Truncate(20); err != nil { panic(err) }
+			return nil
+		}, 
+		[]byte("foo\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"),
+	)
+	
+	test(fs, 
+		func(file afero.File) error {
+			if _, err := file.Write([]byte("itspansoneblock!")); err != nil { panic(err) }
+			if err := file.Truncate(20); err != nil { panic(err) }
+			return nil
+		}, 
+		[]byte("itspansoneblock!\x00\x00\x00\x00"),
+	)
+
+	test(fs, 
+		func(file afero.File) error {
+			if _, err := file.Write([]byte("foo")); err != nil { panic(err) }
+			if err := file.Truncate(6); err != nil { panic(err) }
+			return nil
+		}, 
+		[]byte("foo\x00\x00\x00"),
 	)
 }

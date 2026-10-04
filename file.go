@@ -449,7 +449,60 @@ func (f File) Sync() error {
 
 func (f File) Truncate(size int64) error {
 	debug(f.log, "Truncate(%d)", size)
-	return JosefError{m: "Truncate not implemented"}
+	if size < 0 {
+		return JosefError{m: "Can't truncate to negative size"}
+	} else {
+		size := uint64(size)
+		if size == f.s.size { // nop
+			return nil
+		}
+		var err error
+		var block [BlockSize]byte
+		nBlocks := roundup(size, BlockSize)
+		if nBlocks == roundup(f.s.size, BlockSize) { // only last block affected
+			if size > f.s.size { // need to add null bytes
+				idx := size/BlockSize+1
+				err = f.readBlockAt(&block, idx)
+				if err != nil { return err }
+				clear(block[f.s.size%BlockSize:size%BlockSize])
+				err = f.writeBlockAt(&block, idx)
+				if err != nil { return err }
+			}
+			f.s.size = size
+			return f.storeMeta()
+		} else if size < f.s.size { // need to shrink
+			f.s.size = size
+			err = f.storeMeta()
+			if err != nil { return err }
+			return f.base.Truncate(int64(BlockSize + nBlocks))
+		} else { // need to append null blocks
+			{
+				base := f.s.size%BlockSize
+				if base != 0 {
+					idx := f.s.size/BlockSize+1
+					err = f.readBlockAt(&block, idx)
+					if err != nil { return err }
+					err = f.beginSeqAt(idx*BlockSize)
+					if err != nil { return err }
+					clear(block[base:])
+					err = f.writeBlockAt(&block, idx)
+					if err != nil { return err }
+					clear(block[:base])
+					f.s.size = idx * BlockSize
+				} else {
+					err = f.beginSeqAt(f.s.size+BlockSize)
+					if err != nil { return err }
+				}
+			}
+			final := ceildiv(size, BlockSize)
+			for idx := f.s.size/BlockSize; idx < final; idx += 1 {
+				err = f.writeBlockAt(&block, idx+1)
+				if err != nil { return err }
+			}
+			f.s.size = size
+			return f.storeMeta()
+		}
+	}
 }
 
 func (f File) WriteString(s string) (int, error) {
